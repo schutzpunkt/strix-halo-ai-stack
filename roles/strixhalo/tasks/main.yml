@@ -1,0 +1,384 @@
+---
+# Default task file for schutzpunkt/strixhalo
+
+
+- name: Set hostname to {{ strixhalo_hostname }}.{{ strixhalo_domain }}
+  ansible.builtin.hostname:
+    name: "{{ strixhalo_hostname }}.{{ strixhalo_domain }}"
+    use: systemd
+  become: true
+
+# Grow the root LV to 100 % of free space (and resize the FS)
+- name: Extend the root LV and resize its filesystem
+  lvol:
+    vg: fedora
+    lv: root
+    size: +100%FREE
+    resizefs: true
+    force: true
+  become: true
+  when: root_lv_path is defined
+
+# Modify GRUB kernel parameters to include extra params, avoiding duplicates
+- name: Check current GRUB command line
+  shell: grep '^GRUB_CMDLINE_LINUX=' {{ grub_defaults_file }}
+  register: grub_check
+  changed_when: false
+  failed_when: false
+
+- name: Extract parameter names to check
+  set_fact:
+    param_names: "{{ extra_grub_params.split() | map('regex_replace', '=.*', '') | list }}"
+
+- name: Remove existing instances of parameters and add new ones
+  lineinfile:
+    path: "{{ grub_defaults_file }}"
+    regexp: '^GRUB_CMDLINE_LINUX='
+    line: 'GRUB_CMDLINE_LINUX="{{ grub_current_params }} {{ extra_grub_params }}"'
+    backrefs: no
+  vars:
+    grub_current_params: "{{ grub_check.stdout | regex_replace('^GRUB_CMDLINE_LINUX=\"(.*)\"$', '\\1') | regex_replace('\\s*(amd_iommu|amdgpu\\.gttsize|ttm\\.pages_limit)=\\S+', '') | trim }}"
+  when: extra_grub_params not in grub_check.stdout
+  become: true
+
+- name: Rebuild grub.cfg
+  command: grub2-mkconfig -o "{{ grub_cfg_path }}"
+  become: true
+
+# System update & package installation
+- name: Update all packages (dnf update)
+  dnf:
+    name: "*"
+    state: latest
+    update_cache: yes
+  become: true
+  when: '"update" in ansible_run_tags'
+  tags: update
+
+- name: Install required packages
+  dnf:
+    name: "{{ base_packages }}"
+    state: present
+  become: true
+
+# Firmware downgrade if needed
+- name: Check current linux-firmware version
+  shell: rpm -qa | grep '^linux-firmware-[0-9]'
+  register: firmware_check
+  changed_when: false
+  failed_when: false
+
+- name: Display current firmware packages
+  debug:
+    msg: "Current linux-firmware packages: {{ firmware_check.stdout_lines }}"
+
+- name: Extract firmware version number
+  set_fact:
+    current_fw_version: "{{ firmware_check.stdout | regex_search('linux-firmware-(\\d+)', '\\1') | first }}"
+  when: firmware_check.stdout != ""
+
+- name: Display extracted version
+  debug:
+    msg: "Extracted version: {{ current_fw_version }}"
+  when: current_fw_version is defined
+
+# - name: Check if downgrade is needed
+#   set_fact:
+#     needs_downgrade: "{{ current_fw_version | int >= broken_firmware_version | int }}"
+#   when: current_fw_version is defined
+
+# - name: Warn about problematic firmware
+#   debug:
+#     msg: "ALERT: Firmware version {{ current_fw_version }} (>= {{ broken_firmware_version }}) detected! Downgrading to {{ safe_firmware_version }}..."
+#   when: needs_downgrade | default(false)
+
+# - name: Skip if firmware is already safe
+#   debug:
+#     msg: "Firmware version {{ current_fw_version }} is safe (< {{ broken_firmware_version }})"
+#   when: not (needs_downgrade | default(false))
+
+# - name: Create temporary download directory
+#   file:
+#     path: "{{ ansible_env.HOME }}/linux-firmware-downgrade"
+#     state: directory
+#     mode: "0755"
+#   when: needs_downgrade | default(false)
+
+# - name: Download safe firmware packages (all variants)
+#   shell: |
+#     cd {{ ansible_env.HOME }}/linux-firmware-downgrade
+#     wget -r -np -nd -A '*.rpm' https://kojipkgs.fedoraproject.org/packages/linux-firmware/{{ safe_firmware_version }}/1.fc{{ fedora_version }}/noarch/
+#   args:
+#     creates: "{{ ansible_env.HOME }}/linux-firmware-downgrade/linux-firmware-{{ safe_firmware_version }}-1.fc{{ fedora_version }}.noarch.rpm"
+#   when: needs_downgrade | default(false)
+
+# - name: Downgrade all linux-firmware packages
+#   shell: |
+#     dnf downgrade -y {{ ansible_env.HOME }}/linux-firmware-downgrade/*.rpm
+#   when: needs_downgrade | default(false)
+#   register: downgrade_result
+#   become: true
+
+# - name: Rebuild initramfs
+#   command: dracut -f
+#   when: needs_downgrade | default(false) and downgrade_result.changed
+#   become: true
+
+# - name: Install versionlock plugin
+#   dnf:
+#     name: python3-dnf-plugin-versionlock
+#     state: present
+#   when: needs_downgrade | default(false)
+
+# - name: Hold linux-firmware packages at safe version
+#   shell: |
+#     dnf versionlock add 'linux-firmware-*'
+#   when: needs_downgrade | default(false)
+#   failed_when: false
+
+# - name: Clean up download directory
+#   file:
+#     path: "{{ ansible_env.HOME }}/linux-firmware-downgrade"
+#     state: absent
+#   when: needs_downgrade | default(false)
+
+# - name: Firmware status summary
+#   debug:
+#     msg: |
+#       {% if needs_downgrade | default(false) %}
+#       [+]Firmware downgraded from {{ current_fw_version }} to {{ safe_firmware_version }}
+#       [!] REBOOT REQUIRED for changes to take effect!
+#       {% else %}
+#       [+]Firmware version {{ current_fw_version }} is safe (< {{ broken_firmware_version }})
+#       {% endif %}
+
+# - name: Prompt for reboot if needed
+#   debug:
+#     msg: "[!] System reboot required! Run: sudo reboot"
+#   when: needs_downgrade | default(false)
+
+
+# Clone the amd‑strix‑halo‑toolboxes repository
+- name: Ensure the toolboxes repo is present
+  git:
+    repo: "{{ toolbox_repo_url }}"
+    dest: "{{ toolbox_repo_dest }}"
+    version: HEAD
+    force: no
+    update: yes
+
+- name: Check which toolboxes exist
+  command: podman container exists {{ item.name }}
+  loop: "{{ toolboxes }}"
+  register: toolbox_check
+  failed_when: false
+  changed_when: false
+
+- name: Pre-pull images for missing toolboxes only (may take a while for large images)
+  command: podman pull {{ item.item.image }}
+  loop: "{{ toolbox_check.results }}"
+  when: item.rc != 0
+  retries: 3
+  delay: 60
+  register: pull_result
+  until: pull_result.rc == 0
+
+- name: Create missing toolboxes (images already pulled, so this is fast)
+  shell: |
+    toolbox create {{ item.item.name }} \
+      --image {{ item.item.image }} \
+      --assumeyes \
+      -- {{ item.item.extra_opts | trim }}
+  when: item.rc != 0
+  loop: "{{ toolbox_check.results }}"
+
+
+# Update each toolbox using the repo helper script
+- name: Refresh each toolbox using the repo helper script (this may take a while as images of a few GB are downloaded)
+  command: "{{ toolbox_repo_dest }}/refresh-toolboxes.sh {{ item.name }}"
+  args:
+    chdir: "{{ toolbox_repo_dest }}"
+  loop: "{{ toolboxes }}"
+  when: '"update" in ansible_run_tags'
+  tags: update
+
+
+# Set llama ROCm version based on kernel version
+- name: Set llama ROCm version based on kernel version
+  set_fact:
+    llama_rocm_version: llama-rocm7-nightlies
+    # llama_rocm_version: >-
+    #   {{ 'llama-rocm7-nightlies'
+    #       if ansible_kernel is version('6.18.4', '>=')
+    #       else 'llama-rocm-7.2' }}
+
+- name: Show selected ROCm version
+  debug:
+    msg: "Kernel={{ ansible_kernel }}, using {{ llama_rocm_version }} read more at {{ toolbox_repo_url }}"
+
+
+# Create the model directory
+- name: Ensure the model directory exists
+  file:
+    path: "{{ model_dir }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_gid }}"
+
+# Download each model file if not already present
+- name: Get list of existing model files (faster for network mounts)
+  find:
+    paths: "{{ model_dir }}"
+    patterns: "*.gguf"
+  register: existing_models
+
+- name: Create list of existing filenames
+  set_fact:
+    existing_filenames: "{{ existing_models.files | map(attribute='path') | map('basename') | list }}"
+
+- name: Download missing model files
+  get_url:
+    url: "{{ item }}"
+    dest: "{{ model_dir }}/{{ item | basename }}"
+    mode: "0644"
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_gid }}"
+    timeout: 3600
+  loop: "{{ model_urls }}"
+  when: item | basename not in existing_filenames
+  become: false
+
+# Create llama-swap configuration file
+# note, that volume is not re-created upon playbook re-run, your changes will persist (but you also cant set a new password once set)
+- name: Run Open WebUI container
+  containers.podman.podman_container:
+    name: open-webui
+    image: ghcr.io/open-webui/open-webui:main
+    state: started
+    restart_policy: always
+    network: host
+    volumes:
+      - open-webui:/app/backend/data
+    env:
+      ENABLE_OLLAMA_API: "False"
+      ENABLE_OPENAI_API: "True"
+      OPENAI_API_KEY: "{{ strixhalo_llama_swap_openai_api_key | default(omit, true) }}"
+      OPENAI_API_BASE_URL: "http://localhost:8081/v1"
+      DEFAULT_MODELS: "qwen3.5-122b"
+      WEBUI_AUTH: "True"
+      WEBUI_ADMIN_NAME: "admin"
+      WEBUI_ADMIN_EMAIL: "{{ strixhalo_open_webui_admin_email }}"
+      WEBUI_ADMIN_PASSWORD: "{{ strixhalo_open_webui_admin_password }}"
+    recreate: yes
+    pull: always
+
+- name: Enable podman auto-restart for user containers
+  systemd:
+    name: podman-restart
+    enabled: yes
+    state: started
+    scope: user
+  become: false
+
+- name: Create llama-swap directory
+  file:
+    path: "{{ llama_swap_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Get latest llama-swap release URL
+  uri:
+    url: "{{ llama_swap_releases_url }}"
+    return_content: yes
+  register: llama_swap_release
+
+- name: Extract download URL for linux_amd64
+  set_fact:
+    llama_swap_url: "{{ llama_swap_release.json.assets | selectattr('browser_download_url', 'search', 'linux_amd64') | map(attribute='browser_download_url') | first }}"
+
+- name: Download llama-swap
+  get_url:
+    url: "{{ llama_swap_url }}"
+    dest: "{{ llama_swap_path }}/llama-swap_latest_linux_amd64.tar.gz"
+    mode: "0644"
+
+- name: Extract llama-swap
+  unarchive:
+    src: "{{ llama_swap_path }}/llama-swap_latest_linux_amd64.tar.gz"
+    dest: "{{ llama_swap_path }}/"
+    remote_src: yes
+
+- name: Copy llama-swap config
+  template:
+    src: config.yaml.j2
+    dest: "{{ llama_swap_path }}/config.yaml"
+    mode: "0644"
+
+- name: Ensure user systemd directory exists
+  file:
+    path: "{{ user_systemd_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Install llama-swap user service
+  copy:
+    dest: "{{ user_systemd_dir }}/llama-swap.service"
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=LLaMA Swap Service
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=%h/llama-swap/llama-swap --config %h/llama-swap/config.yaml --listen localhost:8081
+      Restart=on-failure
+      RestartSec=5
+      WorkingDirectory=%h/llama-swap
+
+      [Install]
+      WantedBy=default.target
+  register: service_file
+
+- name: Reload user systemd daemon
+  command: systemctl --user daemon-reexec
+  when: service_file.changed
+
+- name: Enable llama-swap service
+  command: systemctl --user enable llama-swap
+  changed_when: false
+
+- name: Re-Start llama-swap service
+  command: systemctl --user restart llama-swap
+  changed_when: false
+
+- name: Enable user lingering (start services at boot)
+  become: true
+  command: loginctl enable-linger {{ ansible_user_id }}
+  changed_when: false
+
+# Path of this role for later use as role_path can not be used in included roles
+- name: Capture role path before any include_role calls
+  set_fact:
+    this_role_path_lookup: "{{ role_path }}"
+  changed_when: false
+
+- name: Include role to setup nginx reverse proxy with certificate
+  include_role:
+    name: nginx_reverse_proxy
+    public: yes
+  vars:
+    nginx_config_template: "{{ this_role_path_lookup }}/templates/nginx.conf.j2"
+    nginx_subdomains:
+    - name: llamaswap
+      port: 8081
+    - name: openwebui
+      port: 8080
+
+- name: StrixHalo is ready
+  debug:
+    msg:
+      - "Fedora Web: https://{{ ansible_hostname }}.{{ ansible_domain }}"
+      - "llama-swap: https://llamaswap.{{ ansible_hostname }}.{{ ansible_domain }} (Authorization header required: {{ 'yes - Authorization: Bearer ' + strixhalo_llama_swap_openai_api_key if strixhalo_llama_swap_openai_api_key else 'no' }})"
+      - "Open WebUI: https://openwebui.{{ ansible_hostname }}.{{ ansible_domain }}"

@@ -1,0 +1,31 @@
+
+# Generates root_ca.key + root_ca.crt if the key is absent.
+# Skipped automatically when using ACME mode (ansible_ca_fqdn defined).
+- name: Generate root CA if absent
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Generate root CA key and self-signed certificate
+      command: >
+        openssl req -x509 -new -nodes -newkey rsa:4096
+          -keyout {{ ansible_ca_root_key }}
+          -sha256 -days 3650
+          -out {{ ansible_ca_root_crt }}
+          -subj "/CN=StrixHalo Root CA/O=StrixHalo/C=DE"
+      args:
+        creates: "{{ ansible_ca_root_key }}"
+      when: ansible_ca_root_key is defined
+
+    - name: Restrict permissions on root CA private key
+      file:
+        path: "{{ ansible_ca_root_key }}"
+        mode: '0600'
+      when: ansible_ca_root_key is defined
+
+
+- name: Configure all strixhalos
+  hosts: strixhalos
+  gather_facts: true
+  roles:
+    - strixhalo

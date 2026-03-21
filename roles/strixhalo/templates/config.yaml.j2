@@ -1,0 +1,155 @@
+# llama-swap configuration for strixhalo
+# Only one model loaded at a time due to 128GB RAM limit
+
+healthCheckTimeout: 500
+logLevel: info
+logToStdout: "proxy"
+sendLoadingState: true
+startPort: 10001
+includeAliasesInList: true
+
+macros:
+  models_dir: "{{ model_dir }}"
+  # based on the rocm version installed, we use the matching toolbox
+  # we provide both vulkan and rocm toolbox variants to choose from as aliases
+  toolbox_rocm: "{{ llama_rocm_version }}"
+  toolbox_vulkan: "llama-vulkan-radv"
+  # slect globally which toolbox to use later used also for starting/stopping the model server
+  toolbox_used: "${toolbox_rocm}"
+  # start the model server inside the toolbox container
+  llama_server: "toolbox run -c ${toolbox_used} llama-server"
+  llama_server_vulkan: "toolbox run -c ${toolbox_vulkan} llama-server"
+  llama_server_rocm: "toolbox run -c ${toolbox_rocm} llama-server"
+  # kill the toolbox container running the model as otherwise it hangs sometimes
+  llama_stop: "podman kill ${toolbox_used}"
+  llama_stop_vulkan: "podman kill ${toolbox_vulkan}"
+  llama_stop_rocm: "podman kill ${toolbox_rocm}"
+  # default context size for models
+  default_ctx: 131072
+  # port on which the servers start (in our case from 10001 upwards)
+  default_port: "${PORT}"
+
+  temperature: 0.8 # llama-cpp default
+  top_p: 0.95 # llama-cpp default
+  top_k: 40.0 # llama-cpp default
+  min_p: 0.05 # llama-cpp default
+  repeat_penalty: 1.00 # llama-cpp default
+  ubatch_size: 2048 # increase for better agentic coding performance. default is 512
+
+#apiKeys:
+#  - "{{ strixhalo_llama_swap_openai_api_key }}"
+
+# Single model swapping - only one can be loaded at a time
+models:
+
+  "gpt-oss-120b":
+    name: "GPT OSS 120B"
+    description: "GPT OSS 120B (unsloth)"
+    ttl: 0
+    macros:
+      "temperature": 1.0
+      "top_p": 1.0
+      "top_k": 0.0
+      "min_p": 0.0
+    proxy: "http://localhost:${PORT}"
+    cmd: |
+      ${llama_server} --port ${PORT}
+        --model ${models_dir}/gpt-oss-120b-UD-Q8_K_XL-00001-of-00002.gguf
+        --ctx-size ${default_ctx}
+        --n-gpu-layers 999
+        --flash-attn 1
+        --no-mmap
+        --ubatch-size ${ubatch_size}
+        --temp ${temperature}
+        --top-p ${top_p}
+        --top-k ${top_k}
+        --min-p ${min_p}
+        --repeat-penalty ${repeat_penalty}
+    cmdStop: ${llama_stop}
+
+
+  "qwen3-coder-next-80b":
+    name: "Qwen3 Coder Next 80B"
+    description: "Qwen3 Coder Next 80B (bartowski)"
+    ttl: 0
+    macros:
+      "temperature": 1.0
+      "top_p": 0.95
+      "top_k": 40.0
+      "min_p": 0.01
+    proxy: "http://localhost:${PORT}"
+    cmd: |
+      ${llama_server} --port ${PORT}
+        --model ${models_dir}/Qwen_Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf
+        --ctx-size ${default_ctx}
+        --n-gpu-layers 999
+        --flash-attn 1
+        --no-mmap
+        --ubatch-size ${ubatch_size}
+        --temp ${temperature}
+        --top-p ${top_p}
+        --top-k ${top_k}
+        --min-p ${min_p}
+        --repeat-penalty ${repeat_penalty}
+    cmdStop: ${llama_stop}
+
+  "qwen3.5-122b":
+    name: "Qwen3.5 122B"
+    description: "Qwen3.5 122B A10B Q6_K_L (bartowski)"
+    ttl: 0
+    proxy: "http://localhost:${PORT}"
+    cmd: |
+      ${llama_server} --port ${PORT}
+        --model ${models_dir}/Qwen_Qwen3.5-122B-A10B-Q6_K_L-00001-of-00003.gguf
+        --mmproj ${models_dir}/mmproj-Qwen_Qwen3.5-122B-A10B-f16.gguf
+        --ctx-size ${default_ctx}
+        --n-gpu-layers 999
+        --flash-attn 1
+        --no-mmap
+        --ubatch-size ${ubatch_size}
+        --repeat-penalty ${repeat_penalty}
+    cmdStop: ${llama_stop}
+    filters:
+      stripParams: "temperature, top_p, top_k, min_p"
+      setParamsByID:
+        "${MODEL_ID}:instruct-coding":
+          chat_template_kwargs: {enable_thinking: false}
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
+          min_p: 0.0
+        "${MODEL_ID}:thinking-coding":
+          chat_template_kwargs: {enable_thinking: true}
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
+          min_p: 0.0
+        "${MODEL_ID}:thinking-general":
+          chat_template_kwargs: {enable_thinking: true}
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          min_p: 0.0
+        "${MODEL_ID}:instruct-general":
+          chat_template_kwargs: {enable_thinking: false}
+          temperature: 0.7
+          top_p: 0.80
+          top_k: 20
+          min_p: 0.0
+        "${MODEL_ID}:instruct-reasoning":
+          chat_template_kwargs: {enable_thinking: false}
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          min_p: 0.0
+
+
+# Default group - only one model loaded at a time
+groups:
+  "main":
+    swap: true
+    exclusive: true
+    members:
+      - "gpt-oss-120b"
+      - "qwen3-coder-next-80b"
+      - "qwen3.5-122b"

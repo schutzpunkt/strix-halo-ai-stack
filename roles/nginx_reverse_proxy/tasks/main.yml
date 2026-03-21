@@ -1,0 +1,360 @@
+# Validate: ansible_ca_acme_url and ansible_ca_root_key are mutually exclusive
+- name: Fail if both ansible_ca_acme_url and ansible_ca_root_key are set
+  fail:
+    msg: "ansible_ca_acme_url and ansible_ca_root_key are mutually exclusive — set only one"
+  when: ansible_ca_acme_url is defined and ansible_ca_root_key is defined
+
+- name: Install nginx and certbot (Debian/Ubuntu)
+  become: true
+  apt:
+    name:
+      - nginx
+      - openssl
+      - certbot
+      - python3-certbot-nginx
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install nginx and certbot (Fedora)
+  become: true
+  dnf:
+    name:
+      - nginx
+      - openssl
+      - certbot
+      - python3-certbot-nginx
+    state: present
+  when: ansible_os_family == "RedHat"
+
+# ── Trust distribution (both CA modes) ────────────────────────────────────
+- name: Copy root CA to system trust store (Debian/Ubuntu)
+  become: true
+  ansible.builtin.copy:
+    src: "{{ ansible_ca_root_crt }}"
+    dest: /usr/local/share/ca-certificates/StrixHaloRootCA.crt
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_os_family == "Debian" and (ansible_ca_acme_url is defined or ansible_ca_root_key is defined)
+
+- name: Copy root CA to system trust store (Fedora)
+  become: true
+  ansible.builtin.copy:
+    src: "{{ ansible_ca_root_crt }}"
+    dest: /etc/pki/ca-trust/source/anchors/StrixHaloRootCA.crt
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_os_family == "RedHat" and (ansible_ca_acme_url is defined or ansible_ca_root_key is defined)
+
+- name: Update system CA trust store (Debian/Ubuntu)
+  become: true
+  ansible.builtin.command: update-ca-certificates
+  changed_when: "'0 added' not in update_ca.stdout"
+  register: update_ca
+  when: ansible_os_family == "Debian" and (ansible_ca_acme_url is defined or ansible_ca_root_key is defined)
+
+- name: Update system CA trust store (Fedora)
+  become: true
+  ansible.builtin.command: update-ca-trust
+  changed_when: true
+  when: ansible_os_family == "RedHat" and (ansible_ca_acme_url is defined or ansible_ca_root_key is defined)
+
+# ── ACME/step-ca: copy root CA for certbot CA bundle ──────────────────────
+- name: Ensure step-ca certs directory exists
+  become: true
+  file:
+    path: /etc/step-ca/certs
+    state: directory
+    mode: '0755'
+    recurse: true
+  when: ansible_ca_acme_url is defined
+
+- name: Copy root CA for certbot REQUESTS_CA_BUNDLE
+  become: true
+  ansible.builtin.copy:
+    src: "{{ ansible_ca_root_crt }}"
+    dest: /etc/step-ca/certs/root_ca.crt
+    owner: root
+    group: root
+    mode: '0644'
+  when: ansible_ca_acme_url is defined
+
+# ── Firewall (Fedora) ──────────────────────────────────────────────────────
+- name: Open HTTP/HTTPS via firewall-cmd (no python bindings) (Fedora)
+  become: true
+  command: firewall-cmd --permanent --add-service={{ item }}
+  loop:
+    - http
+    - https
+  when: ansible_os_family == "RedHat"
+
+- name: Reload firewalld (Fedora)
+  become: true
+  command: firewall-cmd --reload
+  when: ansible_os_family == "RedHat"
+
+# ── SSL directory (local_ca and self-signed) ───────────────────────────────
+- name: Ensure /etc/nginx/ssl directory exists
+  become: true
+  file:
+    path: /etc/nginx/ssl/{{ item }}
+    state: directory
+    mode: '0750'
+    owner: root
+    group: root
+  loop: "{{ [ansible_hostname + '.' + ansible_domain] + (nginx_subdomains | default([]) | map(attribute='name') | map('regex_replace', '^(.*)$', '\\1.' + ansible_hostname + '.' + ansible_domain) | list) }}"
+  when: ansible_ca_acme_url is not defined
+
+# ── Self-signed certs (neither variable defined) ───────────────────────────
+- name: Generate self-signed TLS certificate for base hostname
+  become: true
+  command: >
+    openssl req -x509 -nodes -days 3650 -newkey rsa:4096
+      -keyout /etc/nginx/ssl/{{ ansible_hostname }}.{{ ansible_domain }}/privkey.pem
+      -out /etc/nginx/ssl/{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem
+      -subj "/CN={{ ansible_hostname }}.{{ ansible_domain }}"
+      -addext "subjectAltName=DNS:{{ ansible_hostname }}.{{ ansible_domain }}"
+  args:
+    creates: "/etc/nginx/ssl/{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem"
+  when: ansible_ca_acme_url is not defined and ansible_ca_root_key is not defined
+
+- name: Generate self-signed TLS certificates for subdomains
+  become: true
+  command: >
+    openssl req -x509 -nodes -days 3650 -newkey rsa:4096
+      -keyout /etc/nginx/ssl/{{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }}/privkey.pem
+      -out /etc/nginx/ssl/{{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem
+      -subj "/CN={{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }}"
+      -addext "subjectAltName=DNS:{{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }}"
+  args:
+    creates: "/etc/nginx/ssl/{{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem"
+  loop: "{{ nginx_subdomains | default([]) }}"
+  when: ansible_ca_acme_url is not defined and ansible_ca_root_key is not defined and nginx_subdomains is defined and nginx_subdomains | length > 0
+
+# ── Local CA-signed certs ──────────────────────────────────────────────────
+- name: Build list of all FQDNs for CA-signed certs
+  set_fact:
+    _ca_fqdns: "{{ [ansible_hostname + '.' + ansible_domain] + (nginx_subdomains | default([]) | map(attribute='name') | map('regex_replace', '^(.*)$', '\\1.' + ansible_hostname + '.' + ansible_domain) | list) }}"
+  when: ansible_ca_root_key is defined
+
+- name: Ensure local signing temp directory exists
+  delegate_to: localhost
+  become: false
+  file:
+    path: /tmp/ansible-ca-signed
+    state: directory
+    mode: '0700'
+  run_once: true
+  when: ansible_ca_root_key is defined
+
+- name: Generate private key for each FQDN
+  become: true
+  command: openssl genrsa -out /etc/nginx/ssl/{{ item }}/privkey.pem 4096
+  args:
+    creates: /etc/nginx/ssl/{{ item }}/privkey.pem
+  loop: "{{ _ca_fqdns | default([]) }}"
+  when: ansible_ca_root_key is defined
+
+- name: Generate CSR for each FQDN
+  become: true
+  command: >
+    openssl req -new
+      -key /etc/nginx/ssl/{{ item }}/privkey.pem
+      -out /tmp/{{ item }}.csr
+      -subj "/CN={{ item }}"
+      -addext "subjectAltName=DNS:{{ item }}"
+  changed_when: false
+  loop: "{{ _ca_fqdns | default([]) }}"
+  when: ansible_ca_root_key is defined
+
+- name: Fetch CSRs to controller
+  become: true
+  fetch:
+    src: /tmp/{{ item }}.csr
+    dest: /tmp/ansible-ca-signed/{{ item }}.csr
+    flat: yes
+  loop: "{{ _ca_fqdns | default([]) }}"
+  when: ansible_ca_root_key is defined
+
+- name: Sign certificates with root CA on controller
+  delegate_to: localhost
+  become: false
+  command: >
+    openssl x509 -req
+      -in /tmp/ansible-ca-signed/{{ item }}.csr
+      -CA {{ ansible_ca_root_crt }}
+      -CAkey {{ ansible_ca_root_key }}
+      -CAcreateserial
+      -out /tmp/ansible-ca-signed/{{ item }}.crt
+      -days 3650
+      -sha256
+      -copy_extensions copy
+  changed_when: false
+  loop: "{{ _ca_fqdns | default([]) }}"
+  when: ansible_ca_root_key is defined
+
+- name: Upload signed certificates to hosts
+  become: true
+  copy:
+    src: /tmp/ansible-ca-signed/{{ item }}.crt
+    dest: /etc/nginx/ssl/{{ item }}/fullchain.pem
+    mode: '0644'
+    owner: root
+    group: root
+  loop: "{{ _ca_fqdns | default([]) }}"
+  when: ansible_ca_root_key is defined
+
+# ── Temporary HTTP config for certbot (ACME flow only) ────────────────────
+- name: Create temporary HTTP-only nginx config for certificate generation
+  become: true
+  copy:
+    dest: "{% if ansible_os_family == 'RedHat' %}/etc/nginx/conf.d/{{ ansible_hostname }}.conf{% else %}/etc/nginx/sites-available/{{ ansible_hostname }}.conf{% endif %}"
+    content: |
+      server {
+          listen 80;
+          listen [::]:80;
+          server_name {{ ansible_hostname }}.{{ ansible_domain }} {% for subdomain in nginx_subdomains | default([]) %}{{ subdomain.name }}.{{ ansible_hostname }}.{{ ansible_domain }} {% endfor %};
+
+          location / {
+              return 200 "OK";
+          }
+      }
+    mode: '0644'
+  when: ansible_ca_acme_url is defined
+
+- name: Enable site (Debian only)
+  become: true
+  file:
+    src: /etc/nginx/sites-available/{{ ansible_hostname }}.conf
+    dest: /etc/nginx/sites-enabled/{{ ansible_hostname }}.conf
+    state: link
+  when: ansible_os_family == "Debian" and ansible_ca_acme_url is defined
+
+- name: Start nginx with temporary config
+  become: true
+  service:
+    name: nginx
+    state: restarted
+  when: ansible_ca_acme_url is defined
+
+# ── Obtain TLS certs from step-ca using certbot ───────────────────────────
+# https://smallstep.com/docs/tutorials/acme-protocol-acme-clients/index.html#nginx
+- name: Obtain TLS certificate {{ ansible_hostname }}.{{ ansible_domain }} from {{ ansible_ca_acme_url | default('') }} using Certbot
+  become: true
+  command: >
+    certbot --nginx -n -d {{ ansible_hostname }}.{{ ansible_domain }} \
+      --server {{ ansible_ca_acme_url }} \
+      --agree-tos --email {{ ansible_ca_acme_email }}
+  environment:
+    REQUESTS_CA_BUNDLE: /etc/step-ca/certs/root_ca.crt
+  args:
+    creates: "/etc/letsencrypt/live/{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem"
+  when: ansible_ca_acme_url is defined
+
+- name: Obtain TLS certificates for subdomains
+  become: true
+  command: >
+    certbot --nginx -n -d {{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }} \
+      --server {{ ansible_ca_acme_url }} \
+      --agree-tos --email {{ ansible_ca_acme_email }}
+  environment:
+    REQUESTS_CA_BUNDLE: /etc/step-ca/certs/root_ca.crt
+  args:
+    creates: "/etc/letsencrypt/live/{{ item.name }}.{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem"
+  loop: "{{ nginx_subdomains | default([]) }}"
+  when: ansible_ca_acme_url is defined and nginx_subdomains is defined and nginx_subdomains | length > 0
+
+# ── Certbot renewal (ACME flow only) ──────────────────────────────────────
+# Certs from step-ca are 24h. Renew every 4h
+- name: Set certbot timer facts
+  set_fact:
+    _certbot_timer: "{{ 'certbot.timer' if ansible_os_family == 'Debian' else 'certbot-renew.timer' }}"
+    _certbot_timer_dropin: "{{ 'certbot.timer.d' if ansible_os_family == 'Debian' else 'certbot-renew.timer.d' }}"
+  when: ansible_ca_acme_url is defined
+
+
+- name: Create certbot timer drop-in directory
+  become: true
+  file:
+    path: /etc/systemd/system/{{ _certbot_timer_dropin }}
+    state: directory
+    mode: '0755'
+  when: ansible_ca_acme_url is defined
+
+- name: Override certbot timer schedule
+  become: true
+  copy:
+    dest: /etc/systemd/system/{{ _certbot_timer_dropin }}/override.conf
+    mode: '0644'
+    content: |
+      [Timer]
+      OnCalendar=
+      OnCalendar=*-*-* 00/4:00:00
+      RandomizedDelaySec=5min
+  when: ansible_ca_acme_url is defined
+  register: _certbot_timer_override
+
+- name: Reload systemd daemon after timer override
+  become: true
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: ansible_ca_acme_url is defined and _certbot_timer_override.changed
+
+- name: Ensure certbot renewal via systemd timer
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ _certbot_timer }}"
+    enabled: true
+    state: started
+  when: ansible_ca_acme_url is defined
+
+# ── Configure NGINX reverse proxy ─────────────────────────────────────────
+- name: Debug nginx_config_template
+  debug:
+    msg: "nginx_config_template = {{ nginx_config_template | default('not defined') }}"
+
+- name: Configure NGINX reverse proxy for {{ ansible_hostname }} (Debian/Ubuntu)
+  become: true
+  template:
+    src: "{{ nginx_config_template }}"
+    dest: /etc/nginx/sites-available/{{ ansible_hostname }}.conf
+    mode: '0644'
+  when: ansible_os_family == "Debian"
+
+- name: Enable {{ ansible_hostname }} site (Debian/Ubuntu)
+  become: true
+  file:
+    src: /etc/nginx/sites-available/{{ ansible_hostname }}.conf
+    dest: /etc/nginx/sites-enabled/{{ ansible_hostname }}.conf
+    state: link
+    force: true
+  when: ansible_os_family == "Debian"
+
+- name: Remove default site (Debian/Ubuntu)
+  become: true
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  when: ansible_os_family == "Debian"
+
+- name: Configure & Enable NGINX reverse proxy for {{ ansible_hostname }} (Fedora)
+  become: true
+  template:
+    src: "{{ nginx_config_template }}"
+    dest: /etc/nginx/conf.d/{{ ansible_hostname }}.conf
+    mode: '0644'
+  when: ansible_os_family == "RedHat"
+
+- name: Allow NGINX to connect to network (SELinux) without Python module (Fedora)
+  become: true
+  command: setsebool -P httpd_can_network_connect 1
+  when: ansible_os_family == "RedHat"
+
+- name: Ensure nginx is enabled and running
+  become: true
+  systemd:
+    name: nginx
+    enabled: true
+    state: restarted

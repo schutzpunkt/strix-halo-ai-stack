@@ -1,0 +1,16 @@
+all:
+  children:
+    strixhalos:
+      hosts:
+        strixhalo1:
+          # The IP of the host
+          ansible_host: 192.168.12.70
+          # Your fedora username
+          ansible_user: fedora
+          # The private ssh_key of the fedora user
+          ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+          # set the hostname and domain for this inscance. 
+          # be aware that you require DNS entries or a /etc/hosts config.
+          # if so your host is reachable at framework.lan
+          strixhalo_hostname: framework
+          strixhalo_domain: lan

@@ -1,0 +1,29 @@
+[Unit]
+      Description=Open WebUI Container
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStartPre=-/usr/bin/podman rm -f open-webui
+      ExecStart=/usr/bin/podman run --rm --name open-webui \
+        --network host \
+        -v open-webui:/app/backend/data \
+        -e ENABLE_OLLAMA_API=False \
+        -e ENABLE_OPENAI_API=True \
+{% if strixhalo_llama_swap_openai_api_key %}
+        -e OPENAI_API_KEY={{ strixhalo_llama_swap_openai_api_key }} \
+{% endif %}
+        -e OPENAI_API_BASE_URL=http://localhost:10001/v1 \
+        -e DEFAULT_MODELS=qwen3.5-122b:instruct-reasoning \
+        -e WEBUI_AUTH=True \
+        -e WEBUI_ADMIN_NAME=admin \
+        -e WEBUI_ADMIN_EMAIL=openwebui@{{ email_smtp_domain }} \
+        -e WEBUI_ADMIN_PASSWORD={{ strixhalo_open_webui_admin_password }} \
+        ghcr.io/open-webui/open-webui:main
+      ExecStop=/usr/bin/podman stop open-webui
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=default.target

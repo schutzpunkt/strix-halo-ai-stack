@@ -1,0 +1,79 @@
+# Upstreams
+upstream fedora {
+    server 127.0.0.1:9090;
+    keepalive 10;
+}
+{% for subdomain in nginx_subdomains | default([]) %}
+upstream {{ subdomain.name | replace('-', '') }} {
+    server 127.0.0.1:{{ subdomain.port }};
+    keepalive 10;
+}
+{% endfor %}
+
+# HTTP redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ ansible_hostname }}.{{ ansible_domain }} {% for subdomain in nginx_subdomains | default([]) %}{{ subdomain.name }}.{{ ansible_hostname }}.{{ ansible_domain }}{% if not loop.last %} {% endif %}{% endfor %};
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS base hostname
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name {{ ansible_hostname }}.{{ ansible_domain }};
+
+    ssl_certificate {% if ansible_ca_acme_url is defined %}/etc/letsencrypt/live{% else %}/etc/nginx/ssl{% endif %}/{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem;
+    ssl_certificate_key {% if ansible_ca_acme_url is defined %}/etc/letsencrypt/live{% else %}/etc/nginx/ssl{% endif %}/{{ ansible_hostname }}.{{ ansible_domain }}/privkey.pem;
+
+    location / {
+        proxy_pass http://fedora;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_connect_timeout 600s;
+        proxy_send_timeout 600s;
+        keepalive_timeout 600s;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+    }
+}
+
+# HTTPS servers
+{% for subdomain in nginx_subdomains | default([]) %}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {{ subdomain.name }}.{{ ansible_hostname }}.{{ ansible_domain }};
+    
+    ssl_certificate {% if ansible_ca_acme_url is defined %}/etc/letsencrypt/live{% else %}/etc/nginx/ssl{% endif %}/{{ subdomain.name }}.{{ ansible_hostname }}.{{ ansible_domain }}/fullchain.pem;
+    ssl_certificate_key {% if ansible_ca_acme_url is defined %}/etc/letsencrypt/live{% else %}/etc/nginx/ssl{% endif %}/{{ subdomain.name }}.{{ ansible_hostname }}.{{ ansible_domain }}/privkey.pem;
+    
+    location / {
+        proxy_pass http://{{ subdomain.name | replace('-', '') }};
+        
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_connect_timeout 600s;
+        proxy_send_timeout 600s;
+        keepalive_timeout 600s;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+    }
+}
+{% endfor %}

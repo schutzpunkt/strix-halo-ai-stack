@@ -1,0 +1,30 @@
+# CA mode: 
+# set exactly ONE of these - setting both will cause the playbook to fail.
+
+# CA mode: ACME
+# ACME/certbot against a running step-ca or other ACME supporting instance
+ansible_ca_acme_url: https://stepca.example.lan/acme/acme/directory
+ansible_ca_root_crt: "{{ playbook_dir }}/files/step-ca/root_ca.crt"
+ansible_ca_acme_email: "{{ ansible_hostname }}@example.com"
+
+# CA mode: Self Signed
+# ansible_ca_root_key and ansible_ca_root_crt together enable local CA signing.
+# The playbook generates these files automatically on first run if the key is absent.
+#ansible_ca_root_crt: "{{ playbook_dir }}/files/step-ca/root_ca.crt"
+#ansible_ca_root_key: "{{ playbook_dir }}/files/step-ca/root_ca.key"
+
+
+# llama-swap:
+# If you want to set up an API key for llama-swap 
+# be aware that you also cant access the llama-swap ui without this api key anymore
+# This key gets also automatically set for the connection from openwebui to llama-swap
+# bash command to generate:
+# echo "sk-$(head -c 48 /dev/urandom | base64 )"
+strixhalo_llama_swap_openai_api_key: ""
+
+# OpenWebUI:
+# For the OpenWebUI we require an admin user
+# if the password is set once it can only be changed via the web interface
+strixhalo_open_webui_admin_email: "openwebui@example.com"
+strixhalo_open_webui_admin_password: "TODO"
+
