@@ -371,14 +371,14 @@
   vars:
     nginx_config_template: "{{ this_role_path_lookup }}/templates/nginx.conf.j2"
     nginx_subdomains:
-    - name: llamaswap
-      port: 8081
     - name: openwebui
       port: 8080
+    - name: llamaswap
+      port: 8081
 
 - name: StrixHalo is ready
   debug:
     msg:
-      - "Fedora Web: https://{{ ansible_hostname }}.{{ ansible_domain }}"
-      - "llama-swap: https://llamaswap.{{ ansible_hostname }}.{{ ansible_domain }} (Authorization header required: {{ 'yes - Authorization: Bearer ' + strixhalo_llama_swap_openai_api_key if strixhalo_llama_swap_openai_api_key else 'no' }})"
+      - "Open WebUI: https://{{ ansible_hostname }}.{{ ansible_domain }}"
       - "Open WebUI: https://openwebui.{{ ansible_hostname }}.{{ ansible_domain }}"
+      - "llama-swap: https://llamaswap.{{ ansible_hostname }}.{{ ansible_domain }} (Authorization header required: {{ 'yes - Authorization: Bearer ' + strixhalo_llama_swap_openai_api_key if strixhalo_llama_swap_openai_api_key else 'no' }})"
