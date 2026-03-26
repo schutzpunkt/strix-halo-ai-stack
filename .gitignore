@@ -1,0 +1,40 @@
+# Certificates
+*.crt
+*.key
+
+# Ansible
+*.retry
+
+# -----------------------
+# OS files
+# -----------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# -----------------------
+# Editor files
+# -----------------------
+# Vim
+*.swp
+*.swo
+*.swn
+# Emacs
+*~
+# VSCode
+.vscode/
+.history/
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+
+# -----------------------
+# Logs and temp files
+# -----------------------
+*.log
+*.tmp
+*.temp
+*.bak
+*.backup
